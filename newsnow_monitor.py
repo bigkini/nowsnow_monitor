@@ -2,73 +2,88 @@ import cloudscraper
 import json
 import re
 
-def fetch_newsnow_popular(site_name, url):
-    print(f"🔍 {site_name} 정밀 스캐닝...")
-    
+def get_html(url):
     scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'desktop': True
-        }
+        browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
     )
+    # 캐시 방지를 위해 타임스탬프 추가 ㅡ,.ㅡ
+    res = scraper.get(f"{url}&_={re.sub(r'[^0-9]', '', str(__import__('time').time()))}")
+    return res.text if res.status_code == 200 else None
+
+def force_clean_json(raw_str):
+    """JSON 내부의 자바스크립트 특수문자를 강제로 제거/치환합니다."""
+    # 1. undefined 치환
+    raw_str = raw_str.replace(":undefined", ":null")
+    # 2. 제어 문자 제거
+    raw_str = "".join(ch for ch in raw_str if ord(ch) >= 32)
+    return raw_str
+
+def extract_balanced_json(html, start_marker):
+    start_idx = html.find(start_marker)
+    if start_idx == -1: return None
+    
+    json_start_idx = html.find('{', start_idx)
+    if json_start_idx == -1: return None
+    
+    count = 0
+    for i in range(json_start_idx, len(html)):
+        if html[i] == '{':
+            count += 1
+        elif html[i] == '}':
+            count -= 1
+            if count == 0:
+                return html[json_start_idx : i + 1]
+    return None
+
+def parse_newsnow(name, url):
+    print(f"🔍 {name} 파싱 시도 중...")
+    html = get_html(url)
+    
+    if not html or "window.__INITIAL_STATE__" not in html:
+        # 만약 HTML이 비었거나 마커가 없다면 차단된 것임
+        print(f"❌ {name}: HTML에 데이터가 없습니다. (Access Denied 가능성)")
+        return
+
+    raw_json = extract_balanced_json(html, 'window.__INITIAL_STATE__=')
+    if not raw_json:
+        print(f"❌ {name}: JSON 데이터를 잘라내지 못했습니다.")
+        return
 
     try:
-        response = scraper.get(url)
-        html = response.text
-
-        # 1. 더 강력해진 정규표현식 마커 탐색 ㅡ,.ㅡ
-        # 줄바꿈 무시(re.S), 세미콜론 유무 상관없이 자바스크립트 변수 값만 낚아챔
-        json_pattern = re.compile(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*(?:;|</script>)', re.DOTALL)
-        match = json_pattern.search(html)
-
-        # 만약 위 패턴으로 안 잡히면 아주 단순하게 'window.__INITIAL_STATE__=' 뒤부터 첫 '};'까지 찾음
-        if not match:
-            start_idx = html.find("window.__INITIAL_STATE__=")
-            if start_idx != -1:
-                # 시작 지점 보정
-                json_start = html.find("{", start_idx)
-                # 가장 가까운 script 닫는 태그나 세미콜론 찾기
-                json_end = html.find("</script>", json_start)
-                raw_json = html[json_start:json_end].strip()
-                if raw_json.endswith(';'): raw_json = raw_json[:-1]
-                data = json.loads(raw_json)
-            else:
-                print(f"❌ {site_name}: 마커를 도저히 찾을 수 없음.")
-                return
-        else:
-            data = json.loads(match.group(1))
-
-        # 2. 데이터 추출 (경로 다변화 대응)
-        # US/UK 소스마다 page 계층이 있을 수도, 없을 수도 있음
+        # 강제 정제 로직 투입 ㅡ,.ㅡ
+        clean_json = force_clean_json(raw_json)
+        data = json.loads(clean_json)
+        
+        # 기사 탐색 (모든 가능 경로)
         articles = []
-        # 우선순위 1: page.news.mostRead
-        if 'page' in data and 'news' in data['page']:
-            articles = data['page']['news'].get('mostRead', [])
-        # 우선순위 2: news.mostRead
-        if not articles and 'news' in data:
-            articles = data['news'].get('mostRead', [])
+        paths = [
+            ['page', 'news', 'mostRead'],
+            ['news', 'mostRead'],
+            ['page', 'news', 'topStories'] # 인기 뉴스가 없을 때 톱 뉴스로 대체
+        ]
+        
+        for path in paths:
+            temp = data
+            for key in path:
+                if isinstance(temp, dict):
+                    temp = temp.get(key, {})
+            if isinstance(temp, list) and len(temp) > 0:
+                articles = temp
+                break
 
-        # 3. 출력
         if articles:
-            print(f"\n🏆 [{site_name}] 인기 TOP 10")
+            print(f"\n🏆 [{name}] 성공!")
+            domain = "https://www.newsnow.co.uk" if "co.uk" in url else "https://www.newsnow.com"
             for i, art in enumerate(articles[:10], 1):
-                title = art.get('title', 'Untitled')
-                domain = "https://www.newsnow.co.uk" if "co.uk" in url else "https://www.newsnow.com"
-                link = art.get('url', '')
-                full_url = link if link.startswith('http') else domain + link
-                print(f"{i}위. {title}\n   🔗 {full_url}")
+                full_url = art['url'] if art['url'].startswith('http') else domain + art['url']
+                print(f"{i}위. {art.get('title')}\n   🔗 {full_url}")
         else:
-            print(f"⚠️ {site_name}: 데이터 경로는 찾았으나 기사가 비어있음.")
-
+            print(f"⚠️ {name}: 데이터 구조는 파싱했으나 기사 리스트가 비어있음.")
+            
     except Exception as e:
-        print(f"❌ {site_name} 에러: {str(e)}")
+        print(f"❌ {name} JSON 해석 실패: {str(e)}")
 
-# 실행 (이전과 동일)
 if __name__ == "__main__":
-    targets = [
-        {"name": "NewsNow US", "url": "https://www.newsnow.com/us/Sports?type=ts"},
-        {"name": "NewsNow UK", "url": "https://www.newsnow.co.uk/h/Sport?type=ts"}
-    ]
-    for target in targets:
-        fetch_newsnow_popular(target['name'], target['url'])
+    # US부터 집중 타격
+    parse_newsnow("NewsNow US", "https://www.newsnow.com/us/Sports?type=ts")
+    parse_newsnow("NewsNow UK", "https://www.newsnow.co.uk/h/Sport?type=ts")
