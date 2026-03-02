@@ -1,89 +1,109 @@
 import cloudscraper
 import json
 import re
+import os
+import requests
+import time
+
+# --- 설정 (GitHub Secrets) ---
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+DB_FILE = "sent_urls.txt"
+EXPIRATION_SEC = 24 * 60 * 60  # 24시간 (초 단위) ㅡ,.ㅡ
 
 def get_html(url):
     scraper = cloudscraper.create_scraper(
         browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
     )
-    # 캐시 방지를 위해 타임스탬프 추가 ㅡ,.ㅡ
-    res = scraper.get(f"{url}&_={re.sub(r'[^0-9]', '', str(__import__('time').time()))}")
+    res = scraper.get(f"{url}&_={int(time.time())}")
     return res.text if res.status_code == 200 else None
-
-def force_clean_json(raw_str):
-    """JSON 내부의 자바스크립트 특수문자를 강제로 제거/치환합니다."""
-    # 1. undefined 치환
-    raw_str = raw_str.replace(":undefined", ":null")
-    # 2. 제어 문자 제거
-    raw_str = "".join(ch for ch in raw_str if ord(ch) >= 32)
-    return raw_str
 
 def extract_balanced_json(html, start_marker):
     start_idx = html.find(start_marker)
     if start_idx == -1: return None
-    
     json_start_idx = html.find('{', start_idx)
     if json_start_idx == -1: return None
-    
     count = 0
     for i in range(json_start_idx, len(html)):
-        if html[i] == '{':
-            count += 1
+        if html[i] == '{': count += 1
         elif html[i] == '}':
             count -= 1
-            if count == 0:
-                return html[json_start_idx : i + 1]
+            if count == 0: return html[json_start_idx : i + 1]
     return None
 
-def parse_newsnow(name, url):
-    print(f"🔍 {name} 파싱 시도 중...")
-    html = get_html(url)
-    
-    if not html or "window.__INITIAL_STATE__" not in html:
-        # 만약 HTML이 비었거나 마커가 없다면 차단된 것임
-        print(f"❌ {name}: HTML에 데이터가 없습니다. (Access Denied 가능성)")
+def load_db():
+    """파일에서 데이터를 읽고 24시간이 지난 항목은 즉시 필터링합니다."""
+    valid_db = {}
+    now = time.time()
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f:
+            for line in f:
+                try:
+                    ts, url = line.strip().split("|", 1)
+                    if now - float(ts) < EXPIRATION_SEC:
+                        valid_db[url] = ts
+                except ValueError:
+                    continue
+    return valid_db
+
+def save_db(db_dict):
+    """현재 유효한 데이터만 파일에 기록합니다."""
+    with open(DB_FILE, "w") as f:
+        for url, ts in db_dict.items():
+            f.write(f"{ts}|{url}\n")
+
+def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ 텔레GRAM 설정 미비")
         return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": False}
+    requests.post(url, json=payload)
+
+def parse_and_notify(name, url, db_dict):
+    html = get_html(url)
+    if not html: return db_dict
 
     raw_json = extract_balanced_json(html, 'window.__INITIAL_STATE__=')
-    if not raw_json:
-        print(f"❌ {name}: JSON 데이터를 잘라내지 못했습니다.")
-        return
+    if not raw_json: return db_dict
 
+    new_articles = []
+    now = time.time()
     try:
-        # 강제 정제 로직 투입 ㅡ,.ㅡ
-        clean_json = force_clean_json(raw_json)
-        data = json.loads(clean_json)
+        raw_json = raw_json.replace(":undefined", ":null")
+        data = json.loads(raw_json)
         
-        # 기사 탐색 (모든 가능 경로)
         articles = []
-        paths = [
-            ['page', 'news', 'mostRead'],
-            ['news', 'mostRead'],
-            ['page', 'news', 'topStories'] # 인기 뉴스가 없을 때 톱 뉴스로 대체
-        ]
-        
-        for path in paths:
+        for path in [['page', 'news', 'mostRead'], ['news', 'mostRead']]:
             temp = data
             for key in path:
-                if isinstance(temp, dict):
-                    temp = temp.get(key, {})
+                if isinstance(temp, dict): temp = temp.get(key, {})
             if isinstance(temp, list) and len(temp) > 0:
                 articles = temp
                 break
 
-        if articles:
-            print(f"\n🏆 [{name}] 성공!")
-            domain = "https://www.newsnow.co.uk" if "co.uk" in url else "https://www.newsnow.com"
-            for i, art in enumerate(articles[:10], 1):
-                full_url = art['url'] if art['url'].startswith('http') else domain + art['url']
-                print(f"{i}위. {art.get('title')}\n   🔗 {full_url}")
-        else:
-            print(f"⚠️ {name}: 데이터 구조는 파싱했으나 기사 리스트가 비어있음.")
+        domain = "https://www.newsnow.co.uk" if "co.uk" in url else "https://www.newsnow.com"
+        
+        for art in articles[:10]:
+            title = art.get('title')
+            link = art['url'] if art['url'].startswith('http') else domain + art['url']
             
+            if link not in db_dict:
+                new_articles.append(f"<b>{title}</b>\n{link}")
+                db_dict[link] = str(now) # 발송 시간과 함께 저장
+                
     except Exception as e:
-        print(f"❌ {name} JSON 해석 실패: {str(e)}")
+        print(f"❌ {name} 파싱 에러: {e}")
+        
+    if new_articles:
+        msg = f"🏆 <b>[{name} 인기 뉴스]</b>\n\n" + "\n\n".join(new_articles)
+        send_telegram(msg)
+        print(f"✅ {name}: {len(new_articles)}개 신규 뉴스 발송")
+    
+    return db_dict
 
 if __name__ == "__main__":
-    # US부터 집중 타격
-    parse_newsnow("NewsNow US", "https://www.newsnow.com/us/Sports?type=ts")
-    parse_newsnow("NewsNow UK", "https://www.newsnow.co.uk/h/Sport?type=ts")
+    current_db = load_db()
+    current_db = parse_and_notify("NewsNow US", "https://www.newsnow.com/us/Sports?type=ts", current_db)
+    current_db = parse_and_notify("NewsNow UK", "https://www.newsnow.co.uk/h/Sport?type=ts", current_db)
+    save_db(current_db)
