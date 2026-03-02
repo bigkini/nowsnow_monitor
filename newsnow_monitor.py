@@ -89,7 +89,7 @@ def parse_and_notify(name, url, db_dict):
             link = art['url'] if art['url'].startswith('http') else domain + art['url']
             
             if link not in db_dict:
-                new_articles.append(f"<b>{title}</b>\n{link}")
+                new_articles.append(f"• <b>{title}</b>\n{link}")
                 db_dict[link] = str(now) # 발송 시간과 함께 저장
                 
     except Exception as e:
