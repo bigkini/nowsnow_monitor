@@ -1,0 +1,25 @@
+name: newsnow monitor
+
+on:
+  schedule:
+    - cron: '0 * * * *' # 매 시간 정시 실행 (UTC 기준)
+  workflow_dispatch:    # 수동 실행 버튼 활성화 ㅡ,.ㅡ
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Scraper
+        run: python newsnow_monitor.py
