@@ -2,74 +2,73 @@ import cloudscraper
 import json
 import re
 
-def get_html(url):
+def fetch_newsnow_popular(site_name, url):
+    print(f"🔍 {site_name} 정밀 스캐닝...")
+    
     scraper = cloudscraper.create_scraper(
-        browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
     )
-    res = scraper.get(url)
-    return res.text if res.status_code == 200 else None
-
-def extract_balanced_json(html, start_marker):
-    """중괄호 짝을 맞춰서 가장 정확한 JSON 덩어리를 추출합니다 ㅡ,.ㅡ"""
-    start_idx = html.find(start_marker)
-    if start_idx == -1: return None
-    
-    json_start_idx = html.find('{', start_idx)
-    if json_start_idx == -1: return None
-    
-    count = 0
-    for i in range(json_start_idx, len(html)):
-        if html[i] == '{':
-            count += 1
-        elif html[i] == '}':
-            count -= 1
-            if count == 0:
-                return html[json_start_idx : i + 1]
-    return None
-
-def parse_newsnow(name, url):
-    print(f"🔍 {name} 데이터 추출 중...")
-    html = get_html(url)
-    if not html:
-        print("❌ HTML 로드 실패")
-        return
-
-    # 1. 중괄호 짝 맞추기 로직으로 JSON 추출
-    raw_json = extract_balanced_json(html, 'window.__INITIAL_STATE__=')
-    
-    if not raw_json:
-        print("❌ INITIAL_STATE 마커를 찾지 못했습니다.")
-        return
 
     try:
-        data = json.loads(raw_json)
-        
-        # 2. 경로 유연화 (US/UK 통합 대응) ㅡ,.ㅡ
-        # page.news.mostRead 혹은 news.mostRead 둘 다 확인
+        response = scraper.get(url)
+        html = response.text
+
+        # 1. 더 강력해진 정규표현식 마커 탐색 ㅡ,.ㅡ
+        # 줄바꿈 무시(re.S), 세미콜론 유무 상관없이 자바스크립트 변수 값만 낚아챔
+        json_pattern = re.compile(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*(?:;|</script>)', re.DOTALL)
+        match = json_pattern.search(html)
+
+        # 만약 위 패턴으로 안 잡히면 아주 단순하게 'window.__INITIAL_STATE__=' 뒤부터 첫 '};'까지 찾음
+        if not match:
+            start_idx = html.find("window.__INITIAL_STATE__=")
+            if start_idx != -1:
+                # 시작 지점 보정
+                json_start = html.find("{", start_idx)
+                # 가장 가까운 script 닫는 태그나 세미콜론 찾기
+                json_end = html.find("</script>", json_start)
+                raw_json = html[json_start:json_end].strip()
+                if raw_json.endswith(';'): raw_json = raw_json[:-1]
+                data = json.loads(raw_json)
+            else:
+                print(f"❌ {site_name}: 마커를 도저히 찾을 수 없음.")
+                return
+        else:
+            data = json.loads(match.group(1))
+
+        # 2. 데이터 추출 (경로 다변화 대응)
+        # US/UK 소스마다 page 계층이 있을 수도, 없을 수도 있음
         articles = []
+        # 우선순위 1: page.news.mostRead
         if 'page' in data and 'news' in data['page']:
             articles = data['page']['news'].get('mostRead', [])
-        
+        # 우선순위 2: news.mostRead
         if not articles and 'news' in data:
             articles = data['news'].get('mostRead', [])
 
-        # 3. 결과 출력
+        # 3. 출력
         if articles:
-            print(f"\n🏆 [{name}] Most Read Top 10")
-            print("-" * 45)
-            domain = "https://www.newsnow.co.uk" if "co.uk" in url else "https://www.newsnow.com"
+            print(f"\n🏆 [{site_name}] 인기 TOP 10")
             for i, art in enumerate(articles[:10], 1):
-                title = art.get('title')
+                title = art.get('title', 'Untitled')
+                domain = "https://www.newsnow.co.uk" if "co.uk" in url else "https://www.newsnow.com"
                 link = art.get('url', '')
                 full_url = link if link.startswith('http') else domain + link
                 print(f"{i}위. {title}\n   🔗 {full_url}")
-            print("\n")
         else:
-            print("⚠️ 데이터 경로는 찾았으나 기사가 비어있습니다.")
-            
-    except Exception as e:
-        print(f"❌ JSON 파싱 에러: {str(e)}")
+            print(f"⚠️ {site_name}: 데이터 경로는 찾았으나 기사가 비어있음.")
 
+    except Exception as e:
+        print(f"❌ {site_name} 에러: {str(e)}")
+
+# 실행 (이전과 동일)
 if __name__ == "__main__":
-    parse_newsnow("NewsNow US", "https://www.newsnow.com/us/Sports?type=ts")
-    parse_newsnow("NewsNow UK", "https://www.newsnow.co.uk/h/Sport?type=ts")
+    targets = [
+        {"name": "NewsNow US", "url": "https://www.newsnow.com/us/Sports?type=ts"},
+        {"name": "NewsNow UK", "url": "https://www.newsnow.co.uk/h/Sport?type=ts"}
+    ]
+    for target in targets:
+        fetch_newsnow_popular(target['name'], target['url'])
