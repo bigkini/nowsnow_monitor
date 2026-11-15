@@ -2,27 +2,30 @@ name: newsnow monitor
 
 on:
   schedule:
-    # 한국 시간 기준: 09:00, 13:30, 17:00, 19:30 ㅡ,.ㅡ
     - cron: '0 0 * * *'    # 09:00 KST
     - cron: '30 4 * * *'   # 13:30 KST
     - cron: '0 8 * * *'    # 17:00 KST
     - cron: '30 10 * * *'  # 19:30 KST
-  workflow_dispatch:       # 필요할 때 수동으로 실행 가능
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.9'
+          python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install cloudscraper requests
+        run: python -m pip install cloudscraper requests
 
       - name: Run Bot
         env:
@@ -37,3 +40,4 @@ jobs:
           git add sent_urls.txt
           git commit -m "Update sent URLs DB (Time-filtered)" || exit 0
           git push
+
